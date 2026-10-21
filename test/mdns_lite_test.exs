@@ -28,4 +28,16 @@ defmodule MdnsLiteTest do
       assert {:error, :nxdomain} = MdnsLite.gethostbyname("definitely-not-on-network.local", 0)
     end
   end
+
+  describe "query/2" do
+    import MdnsLite.DNS
+
+    test "answers a type with records of that type only, never with the responder's NSEC record" do
+      a = dns_query(class: :in, type: :a, domain: ~c"nerves.local")
+      aaaa = dns_query(class: :in, type: :aaaa, domain: ~c"nerves.local")
+
+      assert %{answer: [dns_rr(type: :a)], additional: []} = MdnsLite.query(a, 0)
+      assert %{answer: [], additional: []} = MdnsLite.query(aaaa, 0)
+    end
+  end
 end

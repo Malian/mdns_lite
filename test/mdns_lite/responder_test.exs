@@ -60,6 +60,22 @@ defmodule MdnsLite.ResponderTest do
     assert {:error, :timeout} = :socket.recvfrom(sender, [], 20)
   end
 
+  test "answers an AAAA query on an IPv4 interface with an NSEC record instead of silence" do
+    {state, sender, destination} = receive_state(:inet)
+    rr = Enum.find(TableServer.get_records(), &match?(dns_rr(type: :a), &1))
+    domain = dns_rr(rr, :domain)
+
+    message =
+      dns_rec(
+        header: dns_header(qr: false),
+        qdlist: [dns_query(domain: domain, type: :aaaa, class: :in, unicast_response: true)]
+      )
+
+    deliver(state, sender, destination, message)
+    assert {:ok, {_source, data}} = :socket.recvfrom(sender, [], 1000)
+    assert {:ok, dns_rec(anlist: [dns_rr(domain: ^domain, type: 47)])} = DNS.decode(data)
+  end
+
   {:ok, interfaces} = :net.getifaddrs(:inet)
 
   @non_loopback_address Enum.find_value(interfaces, fn

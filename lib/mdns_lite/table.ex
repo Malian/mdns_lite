@@ -9,6 +9,14 @@ defmodule MdnsLite.Table do
   alias MdnsLite.DNS
   alias MdnsLite.IfInfo
 
+  # OTP's :inet_dns has no NSEC support, so the record goes out with its raw
+  # type (47) and data. RFC 6762 6.1 restricts the data mDNS uses: the record's
+  # own name, uncompressed, then window 0 of the type bitmap (RFC 4034 4.1.2)
+  # with bit n set for type n. Bit 1 is A: the only type the responder has, as
+  # it answers from IPv4 interfaces only.
+  @nsec 47
+  @nsec_a_only_bitmap <<0, 1, 0x40>>
+
   @type t() :: [DNS.dns_rr()]
 
   # TODO: make this more consistent
@@ -24,10 +32,12 @@ defmodule MdnsLite.Table do
   # (255).
   @spec query(t(), DNS.dns_query(), IfInfo.t()) :: [DNS.dns_rr()]
   def query(table, query, %IfInfo{} = if_info) do
-    query
-    |> normalize_query(if_info)
-    |> run_query(table)
-    |> Enum.flat_map(&fixup_rr(&1, if_info))
+    query = normalize_query(query, if_info)
+
+    case query |> run_query(table) |> Enum.flat_map(&fixup_rr(&1, if_info)) do
+      [] -> negative_response(table, query, if_info)
+      records -> records
+    end
   end
 
   @doc """
@@ -95,9 +105,54 @@ defmodule MdnsLite.Table do
     acc ++ srv_records ++ txt_records ++ a_records
   end
 
+  # RFC 6762 6.2 An answer with address records also carries the host's
+  # address records of the other type, or the NSEC record saying it has none,
+  # so that a querier asking for both does not wait for the second.
+  defp add_additional_records(dns_rr(type: type, domain: domain), acc, table, if_info)
+       when type in [:a, :aaaa] do
+    other = if type == :a, do: :aaaa, else: :a
+    acc ++ query(table, dns_query(class: :in, type: other, domain: domain), if_info)
+  end
+
   # RFC 6763 12.4 No additional records for other types
   defp add_additional_records(_record, acc, _table, _if_info) do
     acc
+  end
+
+  # RFC 6762 6.1 Negative Responses
+  #
+  # An AAAA query for one of our host names, on an interface without an IPv6
+  # address, is answered with an NSEC record saying the name has an A record
+  # only. Without it, a querier that asks for A and AAAA together (macOS, iOS)
+  # waits about 5 seconds for an answer that never comes before it uses the A
+  # record. The interface check keeps the cache, which passes no interface,
+  # from asserting anything about a name it only caches.
+  defp negative_response(table, dns_query(class: :in, type: :aaaa, domain: domain), %IfInfo{
+         ipv4_address: {_, _, _, _}
+       }) do
+    case run_query(dns_query(class: :in, type: :a, domain: domain), table) do
+      [dns_rr(ttl: ttl) | _] ->
+        [
+          dns_rr(
+            domain: domain,
+            type: @nsec,
+            class: :in,
+            ttl: ttl,
+            func: true,
+            data: encode_name(domain) <> @nsec_a_only_bitmap
+          )
+        ]
+
+      [] ->
+        []
+    end
+  end
+
+  defp negative_response(_table, _query, _if_info), do: []
+
+  defp encode_name(domain) do
+    labels = domain |> to_string() |> String.split(".", trim: true)
+    for(label <- labels, into: <<>>, do: <<byte_size(label), label::binary>>) <> <<0>>
   end
 
   defp run_query(dns_query(class: class, type: type, domain: domain), table) do
@@ -117,7 +172,6 @@ defmodule MdnsLite.Table do
     query
   end
 
-  # TODO: Fate sharing - send IPv6 records when sending IPv4 ones and vice versa
   defp fixup_rr(dns_rr(class: :in, type: :a, data: :ipv4_address) = rr, if_info) do
     [dns_rr(rr, data: if_info.ipv4_address)]
   end

@@ -190,11 +190,22 @@ defmodule MdnsLite do
     # 2. Try the caches
     # 3. Send the query
     # 4. Wait for response to collect and return the matchers
-    with %{answer: []} <- MdnsLite.TableServer.query(q, @local_if_info),
+    with %{answer: []} <-
+           q |> MdnsLite.TableServer.query(@local_if_info) |> drop_negative_answers(),
          %{answer: []} <- MdnsLite.Responder.query_all_caches(q) do
       MdnsLite.Responder.multicast_all(q)
       Process.sleep(timeout)
       MdnsLite.Responder.query_all_caches(q)
     end
   end
+
+  # The table's negative answers (RFC 6762 6.1: NSEC records, type 47) are for
+  # the responder to send on the network. A caller of this function asks for a
+  # type and gets records of that type, or nothing.
+  defp drop_negative_answers(%{answer: answer, additional: additional}) do
+    %{answer: Enum.reject(answer, &nsec?/1), additional: Enum.reject(additional, &nsec?/1)}
+  end
+
+  defp nsec?(dns_rr(type: 47)), do: true
+  defp nsec?(_record), do: false
 end

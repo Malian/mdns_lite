@@ -31,8 +31,16 @@ defmodule MdnsLite.CacheTest do
       |> Cache.insert(0, @test_a_record)
       |> Cache.insert(0, @test_aaaa_record)
 
+    # RFC 6762 6.2: an address answer carries the name's other address records
     assert Cache.query(cache, dns_query(class: :in, type: :a, domain: ~c"nerves-1234.local")) ==
-             %{answer: [@test_a_record], additional: []}
+             %{answer: [@test_a_record], additional: [@test_aaaa_record]}
+  end
+
+  test "never answers for a name it only caches with a negative response" do
+    cache = Cache.insert(Cache.new(), 0, @test_a_record)
+
+    assert Cache.query(cache, dns_query(class: :in, type: :aaaa, domain: ~c"nerves-1234.local")) ==
+             %{answer: [], additional: []}
   end
 
   test "expires old records" do

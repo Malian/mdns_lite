@@ -13,6 +13,34 @@ defmodule MdnsLite.TableTest do
 
   doctest MdnsLite.Table
 
+  # The NSEC record of nerves-21a5.local that says it has an A record and nothing else: the next domain is the
+  # name itself (RFC 6762 6.1), then window 0 with one byte of bitmap where bit 1 is A.
+  @nsec_a_only dns_rr(
+                 domain: ~c"nerves-21a5.local",
+                 type: 47,
+                 class: :in,
+                 ttl: 120,
+                 func: true,
+                 data: <<11, "nerves-21a5", 5, "local", 0, 0, 1, 0x40>>
+               )
+
+  @a_record dns_rr(
+              domain: ~c"nerves-21a5.local",
+              type: :a,
+              class: :in,
+              ttl: 120,
+              data: {192, 168, 9, 57}
+            )
+
+  @nsec_alias_a_only dns_rr(
+                       domain: ~c"nerves.local",
+                       type: 47,
+                       class: :in,
+                       ttl: 120,
+                       func: true,
+                       data: <<6, "nerves", 5, "local", 0, 0, 1, 0x40>>
+                     )
+
   defp test_config() do
     %Options{}
     |> Options.add_hosts(["nerves-21a5", "nerves"])
@@ -40,9 +68,12 @@ defmodule MdnsLite.TableTest do
     ])
   end
 
-  defp do_query(query, config \\ test_config()) do
+  defp do_query(
+         query,
+         config \\ test_config(),
+         if_info \\ %MdnsLite.IfInfo{ipv4_address: {192, 168, 9, 57}}
+       ) do
     table = Table.Builder.from_options(config)
-    if_info = %MdnsLite.IfInfo{ipv4_address: {192, 168, 9, 57}}
     answer_rr = Table.query(table, query, if_info)
     additional_rr = Table.additional_records(table, answer_rr, if_info)
     %{answer: answer_rr, additional: additional_rr}
@@ -61,7 +92,7 @@ defmodule MdnsLite.TableTest do
           data: {192, 168, 9, 57}
         )
       ],
-      additional: []
+      additional: [@nsec_a_only]
     }
 
     assert do_query(query) == result
@@ -74,7 +105,7 @@ defmodule MdnsLite.TableTest do
       answer: [
         dns_rr(domain: ~c"nerves.local", type: :a, class: :in, ttl: 120, data: {192, 168, 9, 57})
       ],
-      additional: []
+      additional: [@nsec_alias_a_only]
     }
 
     assert do_query(query) == result
@@ -93,7 +124,7 @@ defmodule MdnsLite.TableTest do
           data: {192, 168, 9, 57}
         )
       ],
-      additional: []
+      additional: [@nsec_a_only]
     }
 
     assert do_query(query) == result
@@ -104,6 +135,53 @@ defmodule MdnsLite.TableTest do
       dns_query(domain: ~c"someone-else.local", type: :a, class: :in, unicast_response: true)
 
     assert do_query(query) == %{answer: [], additional: []}
+  end
+
+  describe "negative responses (RFC 6762 6.1 and 6.2)" do
+    test "answers an AAAA request on an IPv4-only interface with an NSEC record" do
+      query = dns_query(domain: ~c"nerves-21a5.local", type: :aaaa, class: :in)
+
+      assert do_query(query) == %{answer: [@nsec_a_only], additional: []}
+    end
+
+    test "adds the NSEC record for the missing AAAA to an A answer" do
+      query = dns_query(domain: ~c"nerves-21a5.local", type: :a, class: :in)
+
+      assert do_query(query) == %{answer: [@a_record], additional: [@nsec_a_only]}
+    end
+
+    test "adds the AAAA records to an A answer on an interface that has them" do
+      query = dns_query(domain: ~c"nerves-21a5.local", type: :a, class: :in)
+      ipv6 = {0xFE80, 0, 0, 0, 0xBA27, 0xEBFF, 0xFE01, 0x0203}
+      if_info = %MdnsLite.IfInfo{ipv4_address: {192, 168, 9, 57}, ipv6_addresses: [ipv6]}
+
+      assert do_query(query, test_config(), if_info) == %{
+               answer: [@a_record],
+               additional: [
+                 dns_rr(
+                   domain: ~c"nerves-21a5.local",
+                   type: :aaaa,
+                   class: :in,
+                   ttl: 120,
+                   data: ipv6
+                 )
+               ]
+             }
+    end
+
+    test "says nothing about a name that is someone else's" do
+      query = dns_query(domain: ~c"someone-else.local", type: :aaaa, class: :in)
+
+      assert do_query(query) == %{answer: [], additional: []}
+    end
+
+    test "the NSEC record is encoded as type 47 and decodes back to itself" do
+      packet = dns_rec(header: dns_header(id: 0, qr: true, aa: true), anlist: [@nsec_a_only])
+
+      assert {:ok, decoded} = packet |> MdnsLite.DNS.encode() |> MdnsLite.DNS.decode()
+      assert [dns_rr(type: 47, func: true, data: data)] = dns_rec(decoded, :anlist)
+      assert data == dns_rr(@nsec_a_only, :data)
+    end
   end
 
   test "responds to a PTR request with a reverse lookup domain" do
@@ -160,7 +238,8 @@ defmodule MdnsLite.TableTest do
           class: :in,
           ttl: 120,
           data: {192, 168, 9, 57}
-        )
+        ),
+        @nsec_a_only
       ]
     }
 
@@ -202,7 +281,8 @@ defmodule MdnsLite.TableTest do
           class: :in,
           ttl: 120,
           data: {192, 168, 9, 57}
-        )
+        ),
+        @nsec_a_only
       ]
     }
 
@@ -259,7 +339,8 @@ defmodule MdnsLite.TableTest do
           class: :in,
           ttl: 120,
           data: {192, 168, 9, 57}
-        )
+        ),
+        @nsec_a_only
       ]
     }
 
@@ -324,7 +405,8 @@ defmodule MdnsLite.TableTest do
       ],
       additional: [
         {:dns_rr, ~c"nerves-21a5.local", :a, :in, 0, 120, {192, 168, 9, 57}, :undefined, [],
-         false}
+         false},
+        @nsec_a_only
       ]
     }
 
@@ -347,7 +429,8 @@ defmodule MdnsLite.TableTest do
       ],
       additional: [
         {:dns_rr, ~c"nerves-21a5.local", :a, :in, 0, 120, {192, 168, 9, 57}, :undefined, [],
-         false}
+         false},
+        @nsec_a_only
       ]
     }
 
@@ -385,7 +468,8 @@ defmodule MdnsLite.TableTest do
       ],
       additional: [
         {:dns_rr, ~c"nerves-21a5.local", :a, :in, 0, 120, {192, 168, 9, 57}, :undefined, [],
-         false}
+         false},
+        @nsec_a_only
       ]
     }
 
